@@ -1,0 +1,43 @@
+name: Schluessel zeigen
+
+# Von Hand gestartet, nachdem das Secret BOULDER_SIGNATUR_SEED gesetzt oder gewechselt ist. Zeigt nur
+# Oeffentliches: den Schluessel (Hex fuer FirmwareSignatur.SCHLUESSEL in Boulder, PEM fuer
+# signatur.pub) und die Signatur der Testaussage, die Boulders Ed25519Test gegen die App prueft. Ihr
+# Tag "test" kann kein Release sein.
+#
+# Bewusst ohne fremde Actions, wie signieren.yml.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  zeigen:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Oeffentlichen Schluessel und Testsignatur zeigen
+        env:
+          SEED: ${{ secrets.BOULDER_SIGNATUR_SEED }}
+        run: |
+          set -euo pipefail
+          umask 077
+          schluessel="$RUNNER_TEMP/signatur.pem"
+          trap 'rm -f "$schluessel" "$RUNNER_TEMP/schluessel.der"' EXIT
+          # Wie in signieren.yml: Vorspann fuer Ed25519 (RFC 8410), dann die 32 Byte des Seeds.
+          python3 - "$RUNNER_TEMP/schluessel.der" <<'PY'
+          import os, re, sys
+          seed = os.environ.get("SEED", "").strip()
+          if not re.fullmatch(r"[0-9a-fA-F]{64}", seed):
+              sys.exit("Secret BOULDER_SIGNATUR_SEED fehlt oder ist kein Seed aus 64 Hex-Zeichen")
+          with open(sys.argv[1], "wb") as f:
+              f.write(bytes.fromhex("302e020100300506032b657004220420" + seed))
+          PY
+          openssl pkey -inform DER -in "$RUNNER_TEMP/schluessel.der" -out "$schluessel"
+          printf 'boulder-firmware/v1\ntest\nnormal_obelix_pvt_test.pbz\n12\nsha256:6f4b6612125fb3a0daecd2799dfd6c9c299424fd920f9b308110a2c1fbd8f443\n' > aussage
+          openssl pkeyutl -sign -inkey "$schluessel" -rawin -in aussage -out test.sig
+          echo "Schluessel (Hex): $(openssl pkey -in "$schluessel" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')"
+          echo "Testsignatur (Hex): $(od -An -tx1 test.sig | tr -d ' \n')"
+          echo "signatur.pub:"
+          openssl pkey -in "$schluessel" -pubout

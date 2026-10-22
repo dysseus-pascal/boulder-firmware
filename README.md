@@ -60,11 +60,14 @@ Boulder baut die Aussage aus dem Release nach und prüft sie gegen die Schlüsse
   nur, wenn das Secret dazu passt. Den Seed an zwei Orten sichern: Passwortmanager und Papier.
 - **Grenze:** Wer das GitHub-Konto übernimmt, kann mit dem Secret signieren. Dann den Schlüssel
   wechseln (unten).
-- **Schlüsselwechsel:**
-  1. Einen neuen Seed erzeugen (`openssl genpkey -algorithm ed25519`).
-  2. Seinen öffentlichen Schlüssel in `FirmwareSignatur.SCHLUESSEL` aufnehmen und die App
+- **Neuer Schlüssel** (auch der erste):
+  1. Einen Seed erzeugen (`openssl rand -hex 32`), an beiden Orten sichern und als Secret
+     `BOULDER_SIGNATUR_SEED` setzen. Bis Schritt 3 signiert der Workflow nichts, weil das
+     Secret nicht zu `signatur.pub` passt.
+  2. Unter Actions → „Schluessel zeigen“ starten. Den Hex-Schlüssel in
+     `FirmwareSignatur.SCHLUESSEL` aufnehmen, die Testsignatur in `Ed25519Test`, dann die App
      ausrollen.
-  3. Secret und `signatur.pub` tauschen.
-  4. Den alten Schlüssel später aus der App nehmen.
+  3. `signatur.pub` gegen die PEM-Ausgabe tauschen.
+  4. Den alten Schlüssel aus der App nehmen.
 - **Zurückziehen:** Das Release als Vorabversion markieren (Boulder überspringt
   Vorabversionen). Die Korrektur kommt als neue Nummer.
