@@ -1,0 +1,136 @@
+name: Signieren und veroeffentlichen
+
+# Von Hand gestartet (Actions, "Run workflow") auf dem Zweig mit dem Release-Commit, der
+# pakete/<tag>.pbz und pakete/<tag>.md traegt (erste Zeile der Titel, darunter der Text). Der
+# Workflow prueft beides, signiert die Aussage ueber das Paket (README, "Signatur") mit dem
+# Schluessel aus dem Secret BOULDER_SIGNATUR_SEED, legt das Release als Entwurf mit Paket und
+# Signatur an und schaltet es erst dann frei: Boulder ueberspringt Entwuerfe, so erscheint das
+# Release nie ohne Signatur. Das Tag entsteht beim Freischalten auf dem Release-Commit.
+#
+# Bewusst ohne fremde Actions: der Schluessel liegt in diesem Lauf, und jede eingebundene Action
+# laese ihn mit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag des Releases (vX.Y.Z-bN)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: signieren-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  signieren:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag }}
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Paket und Text holen
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-b[0-9]+$ ]] || { echo "::error::Kein Tag der Form vX.Y.Z-bN: $TAG"; exit 1; }
+          # JEDE NUMMER NUR EINMAL: Uhren tragen sie schon, ein zweites Paket darunter waere ein anderes.
+          if gh api "repos/$REPO/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "::error::Das Tag $TAG gibt es schon"; exit 1
+          fi
+          gh api --paginate "repos/$REPO/releases?per_page=100" --jq '.[].tag_name' > tags.txt
+          if grep -qxF "$TAG" tags.txt; then
+            echo "::error::Ein Release $TAG gibt es schon, auch ein Entwurf zaehlt"; exit 1
+          fi
+          paket="normal_obelix_pvt_${TAG}.pbz"
+          echo "PAKET=$paket" >> "$GITHUB_ENV"
+          for datei in "pakete/$paket" "pakete/$TAG.md" signatur.pub; do
+            gh api -H "Accept: application/vnd.github.raw" "repos/$REPO/contents/$datei?ref=$GITHUB_SHA" > "$(basename "$datei")"
+          done
+
+      - name: Paket und Text pruefen
+        run: |
+          set -euo pipefail
+          # Jedes Manifest im Paket nennt genau dieses Tag und die Pebble Time 2. Der Text hat einen
+          # Titel und genau einmal die Zeile "Mindest-App: X.Y.Z", so wie Boulder sie liest
+          # (MindestApp.kt): ohne sie boete Boulder die Firmware jeder App-Fassung an.
+          python3 - "$PAKET" "$TAG" "$TAG.md" <<'PY'
+          import json, os, re, sys, zipfile
+          paket, tag, text = sys.argv[1:]
+          with zipfile.ZipFile(paket) as z:
+              manifeste = [n for n in z.namelist() if n.endswith("manifest.json")]
+              if not manifeste:
+                  sys.exit("kein manifest.json im Paket")
+              for n in manifeste:
+                  fw = json.loads(z.read(n))["firmware"]
+                  if fw.get("versionTag") != tag or fw.get("hwrev") != "obelix_pvt":
+                      sys.exit(f"{n}: versionTag {fw.get('versionTag')}, hwrev {fw.get('hwrev')}")
+          with open(text, encoding="utf-8", newline="") as f:
+              roh = f.read()
+          if "\r" in roh:
+              sys.exit(f"{text}: Windows-Zeilenenden (CR)")
+          titel, _, rumpf = roh.partition("\n")
+          titel, rumpf = titel.strip(), rumpf.lstrip("\n")
+          if not titel or not rumpf.strip():
+              sys.exit(f"{text}: erste Zeile der Titel, darunter der Text")
+          mindest = re.findall(r"^Mindest-App: ([0-9]+\.[0-9]+\.[0-9]+)$", rumpf, re.MULTILINE)
+          if len(mindest) != 1:
+              sys.exit(f"{text}: 'Mindest-App: X.Y.Z' steht {len(mindest)}-mal im Text, verlangt ist genau einmal")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"TITEL={titel}\n")
+          with open("rumpf.md", "w", encoding="utf-8") as f:
+              f.write(rumpf)
+          print(f"Manifeste: {', '.join(manifeste)}; Mindest-App {mindest[0]}; Titel: {titel}")
+          PY
+          echo "GROESSE=$(stat -c %s "$PAKET")" >> "$GITHUB_ENV"
+          echo "SHA=$(sha256sum "$PAKET" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Signieren
+        env:
+          SEED: ${{ secrets.BOULDER_SIGNATUR_SEED }}
+        run: |
+          set -euo pipefail
+          umask 077
+          schluessel="$RUNNER_TEMP/signatur.pem"
+          trap 'rm -f "$schluessel" "$RUNNER_TEMP/schluessel.der"' EXIT
+          # Aus dem Seed (64 Hex-Zeichen) wird ein PKCS#8-Schluessel: der feste Vorspann fuer
+          # Ed25519 (RFC 8410), dann die 32 Byte.
+          python3 - "$RUNNER_TEMP/schluessel.der" <<'PY'
+          import os, re, sys
+          seed = os.environ.get("SEED", "").strip()
+          if not re.fullmatch(r"[0-9a-fA-F]{64}", seed):
+              sys.exit("Secret BOULDER_SIGNATUR_SEED fehlt oder ist kein Seed aus 64 Hex-Zeichen")
+          with open(sys.argv[1], "wb") as f:
+              f.write(bytes.fromhex("302e020100300506032b657004220420" + seed))
+          PY
+          openssl pkey -inform DER -in "$RUNNER_TEMP/schluessel.der" -out "$schluessel"
+          # NUR MIT DEM SCHLUESSEL, DEN BOULDER KENNT: signatur.pub im Repo ist sein Gegenstueck.
+          test "$(openssl pkey -in "$schluessel" -pubout -outform DER | sha256sum)" = \
+               "$(openssl pkey -pubin -in signatur.pub -outform DER | sha256sum)" || {
+            echo "::error::Das Secret passt nicht zu signatur.pub"; exit 1; }
+          printf 'boulder-firmware/v1\n%s\n%s\n%s\nsha256:%s\n' "$TAG" "$PAKET" "$GROESSE" "$SHA" > aussage
+          openssl pkeyutl -sign -inkey "$schluessel" -rawin -in aussage -out "$PAKET.sig"
+          test "$(stat -c %s "$PAKET.sig")" = 64
+          openssl pkeyutl -verify -pubin -inkey signatur.pub -rawin -in aussage -sigfile "$PAKET.sig"
+
+      - name: Release anlegen und freischalten
+        run: |
+          set -euo pipefail
+          id=$(jq -n --arg tag "$TAG" --arg sha "$GITHUB_SHA" --arg name "$TAG - $TITEL" --rawfile body rumpf.md \
+                 '{tag_name: $tag, target_commitish: $sha, name: $name, body: $body, draft: true}' \
+               | gh api -X POST "repos/$REPO/releases" --input - --jq .id)
+          for datei in "$PAKET" "$PAKET.sig"; do
+            curl -sS --fail-with-body -X POST -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/octet-stream" --data-binary @"$datei" \
+              "https://uploads.github.com/repos/$REPO/releases/$id/assets?name=$datei" > "$datei.json"
+          done
+          # Boulder nimmt Groesse und sha256 aus der API: ohne sie oder mit anderen Werten boete es
+          # das Paket nicht an. Sonst bleibt der Entwurf stehen.
+          test "$(jq -r .size "$PAKET.json")" = "$GROESSE" || { echo "::error::Groesse in der API weicht ab"; exit 1; }
+          test "$(jq -r '.digest // ""' "$PAKET.json")" = "sha256:$SHA" || {
+            echo "::error::sha256 in der API: $(jq -r '.digest // "keine"' "$PAKET.json")"; exit 1; }
+          gh api -X PATCH "repos/$REPO/releases/$id" -F draft=false -F prerelease=false > /dev/null
+          echo "Veroeffentlicht: $TAG (sha256 $SHA, $GROESSE Byte), Tag auf $GITHUB_SHA"
