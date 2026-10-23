@@ -1,8 +1,13 @@
 # Boulder-Firmware
 
-Firmware-Releases für die Pebble Time 2 (obelix), gebaut aus einem Fork von
+Firmware-Releases für die Pebble Time 2 (obelix), gebaut aus
+[dysseus-pascal/PebbleOS](https://github.com/dysseus-pascal/PebbleOS), einem Fork von
 [PebbleOS](https://github.com/coredevices/PebbleOS) (Apache-2.0).
 Die Begleit-App Boulder bietet die Releases dieses Repos als Update an.
+
+**Quellcode:** öffentlich in [dysseus-pascal/PebbleOS](https://github.com/dysseus-pascal/PebbleOS),
+Zweig `v2` für b27 und neuer. Das Manifest jedes Pakets nennt den Commit, aus dem es gebaut ist
+(b37: `f4f4baed6`). Die älteren Fassungen b1 bis b26 stehen dort als Tags `v4.38.x-bN`.
 
 Was diese Firmware anders macht als die offizielle:
 
